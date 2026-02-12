@@ -1,0 +1,600 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Brüche – Repräsentanten Generator</title>
+  <style>
+    :root { color-scheme: light; }
+    body { font-family: system-ui, Arial, sans-serif; margin: 24px; }
+    h1 { font-size: 1.2rem; margin: 0 0 12px; }
+    .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 14px; max-width: 980px; }
+    label { font-size: 0.95rem; }
+    input, select, button { font-size: 1rem; padding: 6px 10px; }
+    input[type="number"] { width: 90px; }
+    button { cursor: pointer; }
+    canvas { border: 1px solid #222; border-radius: 8px; margin-top: 14px; background: #fff; max-width: 100%; }
+    .hint { color: #444; font-size: 0.95rem; margin-top: 10px; }
+    .small { font-size: 0.9rem; color: #555; }
+    .warn { color: #8a2a00; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Brüche – Repräsentanten Generator</h1>
+
+    <div class="row" style="margin-bottom:10px;">
+      <label>Zähler
+        <input type="number" id="num" value="3" min="0" step="1">
+      </label>
+
+      <label>Nenner
+        <input type="number" id="den" value="4" min="1" step="1">
+      </label>
+
+      <label>Form
+        <select id="shape">
+          <option value="square">Quadrat</option>
+          <option value="rectangle">Rechteck</option>
+          <option value="circle">Kreis</option>
+        </select>
+      </label>
+
+      <label>Füllfarbe
+        <input type="color" id="fillColor" value="#2b6cb0">
+      </label>
+
+      <label>Randfarbe
+        <input type="color" id="strokeColor" value="#111111">
+      </label>
+    </div>
+
+    <div class="row" style="margin-bottom:10px;">
+      <label><input type="checkbox" id="showOutline" checked> Umrandung anzeigen</label>
+      <label><input type="checkbox" id="showLabel" checked> Bruch beschriften</label>
+      <label><input type="checkbox" id="showUnitLabel"> Einheiten beschriften (1, 2, …)</label>
+
+      <label style="margin-left:auto;">Größe
+        <select id="size">
+          <option value="140">klein</option>
+          <option value="180" selected>mittel</option>
+          <option value="240">groß</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="row">
+      <button id="btnDraw">Generieren</button>
+      <button id="btnJpg">Download JPG</button>
+      <button id="btnSvg">Download SVG</button>
+      <span class="small" id="status"></span>
+    </div>
+
+    <canvas id="cnv" width="980" height="420"></canvas>
+    <div class="hint">
+      Tipp: Für Arbeitsblätter ist <b>SVG</b> ideal (verlustfrei skalierbar). Für schnelle Einbindung in Präsentationen geht <b>JPG</b>.
+      <br><span class="small">Hinweis: Sehr große Zähler/Nenner werden automatisch „darstellungsfreundlich“ begrenzt, damit alles flüssig bleibt.</span>
+    </div>
+  </div>
+
+<script>
+/** =========================
+ *  Performance-Konfiguration
+ *  =========================
+ *  MAX_DEN: Obergrenze für Nenner zur schnellen Darstellung.
+ *  MAX_UNITS: Obergrenze für angezeigte Einheiten (bei unechten Brüchen).
+ *  FAST_MODE_DEN: ab diesem Nenner wird beim Kreis ein Schnellmodus genutzt.
+ *  FAST_MODE_LINES: max. Linien im Schnellmodus (Kreis).
+ */
+const PERF = {
+  MAX_DEN: 60,
+  MAX_UNITS: 12,
+  FAST_MODE_DEN: 40,
+  FAST_MODE_LINES: 12
+};
+
+/** =========================
+ *  Helpers
+ *  ========================= */
+const cnv = document.getElementById("cnv");
+const ctx = cnv.getContext("2d");
+
+function clampInt(x, min, max) {
+  const v = Math.floor(Number(x));
+  if (Number.isNaN(v)) return min;
+  return Math.min(max, Math.max(min, v));
+}
+function gcd(a,b){ a=Math.abs(a); b=Math.abs(b); while(b){ [a,b]=[b,a%b]; } return a||1; }
+function simplify(num, den){
+  const g = gcd(num, den);
+  return { num: num/g, den: den/g, g };
+}
+function setStatus(msg, isWarn=false){
+  const el = document.getElementById("status");
+  el.textContent = msg;
+  el.classList.toggle("warn", isWarn);
+}
+function computeUnits(num, den){
+  const whole = Math.floor(num / den);
+  const rest = num % den;
+  const units = whole + (rest > 0 ? 1 : 0);
+  return { whole, rest, units };
+}
+
+function clearCanvas(){
+  ctx.clearRect(0,0,cnv.width,cnv.height);
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0,0,cnv.width,cnv.height);
+}
+
+function drawLabel(text, x, y){
+  ctx.save();
+  ctx.fillStyle = "#111";
+  ctx.font = "16px system-ui, Arial, sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.fillText(text, x, y);
+  ctx.restore();
+}
+function drawUnitIndex(text, x, y){
+  ctx.save();
+  ctx.fillStyle = "#111";
+  ctx.font = "14px system-ui, Arial, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, x, y);
+  ctx.restore();
+}
+
+/** =========================
+ *  Eingaben + Performance-Clipping
+ *  ========================= */
+function getInputs(){
+  const originalNum = clampInt(document.getElementById("num").value, 0, 10000);
+  const originalDen = clampInt(document.getElementById("den").value, 1, 10000);
+
+  const shape = document.getElementById("shape").value;
+  const fillColor = document.getElementById("fillColor").value;
+  const strokeColor = document.getElementById("strokeColor").value;
+  const showOutline = document.getElementById("showOutline").checked;
+  const showLabel = document.getElementById("showLabel").checked;
+  const showUnitLabel = document.getElementById("showUnitLabel").checked;
+  const size = clampInt(document.getElementById("size").value, 80, 400);
+
+  // Vereinfachung nur fürs Anzeigen
+  const simp = simplify(originalNum, originalDen);
+
+  // Performance: Nenner begrenzen, Wert erhalten (annähernd)
+  let num = originalNum;
+  let den = originalDen;
+  let denClipped = false;
+
+  if (den > PERF.MAX_DEN){
+    denClipped = true;
+    const value = num / den;
+    den = PERF.MAX_DEN;
+    num = Math.round(value * den);
+  }
+
+  // Sicherheitsfall: wenn num==0, rest etc. ok.
+  return {
+    originalNum, originalDen,
+    num, den,
+    denClipped,
+    shape, fillColor, strokeColor,
+    showOutline, showLabel, showUnitLabel,
+    size, simp
+  };
+}
+
+/** =========================
+ *  Zeichner (Canvas)
+ *  ========================= */
+function drawSquareOrRectCanvas({x,y,w,h, den, filledParts, fillColor, strokeColor, showOutline}){
+  const partH = h / den;
+
+  // Füllung als 1 großes Rechteck + ggf. Teillinie? (schneller)
+  if (filledParts > 0){
+    ctx.fillStyle = fillColor;
+    ctx.fillRect(x, y, w, partH * filledParts);
+  }
+
+  if (showSUPERVISOR_outlineNeeded(showOutline)) {
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = 2;
+    for(let i=0;i<den;i++){
+      const yy = y + i*partH;
+      ctx.strokeRect(x, yy, w, partH);
+    }
+    ctx.lineWidth = 3;
+    ctx.strokeRect(x, y, w, h);
+  } else {
+    // Außenrahmen trotzdem als Orientierung
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = 3;
+    ctx.strokeRect(x, y, w, h);
+  }
+}
+function RENDER_circleDetailed({cx, cy, r, den, filledParts, fillColor, strokeColor, showOutline}){
+  for(let i=0;i<den;i++){
+    const a0 = (2*Math.PI/den)*i - Math.PI/2;
+    const a1 = (2*Math.PI/den)*(i+1) - Math.PI/2;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, r, a0, a1);
+    ctx.closePath();
+
+    if(i < filledParts){
+      ctx.fillStyle = fillColor;
+      ctx.fill();
+    }
+    if(showOutline){
+      ctx.strokeStyle = strokeColor;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  }
+  if(showOutline){
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, 2*Math.PI);
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+  }
+}
+
+function RENDER_circleFast({cx, cy, r, frac, fillColor, strokeColor, showOutline, lines}){
+  // Außenkreis
+  if(showOutline){
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, 2*Math.PI);
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+  } else {
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, 2*Math.PI);
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  // Füllsektor (1 Pfad)
+  if(frac > 0){
+    const a0 = -Math.PI/2;
+    const a1 = a0 + 2*Math.PI*frac;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, r, a0, a1);
+    ctx.closePath();
+    ctx.fillStyle = fillColor;
+    ctx.fill();
+  }
+
+  // Wenige Radienlinien (max lines)
+  if(showOutline){
+    const L = Math.max(2, Math.min(lines, 60));
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = 1.5;
+    for(let i=0;i<L;i++){
+      const ang = (2*Math.PI/L)*i - Math.PI/2;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx + r*Math.cos(ang), cy + r*Math.sin(ang));
+      ctx.stroke();
+    }
+  }
+}
+
+function computeLayout(shape, size){
+  let unitW = size;
+  let unitH = size;
+  if(shape === "rectangle"){
+    unitW = Math.round(size * 1.35);
+    unitH = size;
+  }
+  return { unitW, unitH };
+}
+
+// kleines Helper, damit Rechteck/Quadrat nicht 1000 Linien zeichnet wenn Outline aus
+function SUPERVISOR_outlineNeeded(showOutline){
+  return showOutline;
+}
+
+function drawCanvas(){
+  const s = getInputs();
+  const { whole, rest, units } = computeUnits(s.num, s.den);
+
+  // Einheiten begrenzen
+  const clippedUnits = Math.min(units, PERF.MAX_UNITS);
+  const unitsClipped = units > PERF.MAX_UNITS;
+
+  const margin = 20;
+  const gap = 26;
+  const top = 60;
+
+  const { unitW, unitH } = computeLayout(s.shape, s.size);
+
+  // Layout in Zeilen
+  const maxPerRow = Math.max(1, Math.floor((cnv.width - 2*margin + gap) / (unitW + gap)));
+  const rows = Math.ceil(clippedUnits / maxPerRow);
+  const neededH = top + rows*(unitH + 50) + margin;
+
+  // Canvas-Höhe nur ändern, wenn nötig
+  if (Math.abs(cnv.height - Math.max(420, neededH)) > 2){
+    cnv.height = Math.max(420, neededH);
+  }
+
+  clearCanvas();
+
+  // Label
+  let warn = false;
+  if(s.showLabel){
+    let label = `${s.originalNum}/${s.originalDen}`;
+    if (s.simp.g > 1){
+      label += ` (vereinfacht: ${s.simp.num}/${s.simp.den})`;
+    }
+    if (s.denClipped){
+      label += `  → Darstellung begrenzt (ca. ${s.num}/${s.den})`;
+      warn = true;
+    }
+    drawLabel(label, margin, 18);
+  }
+
+  // Schnellmodus-Kreis?
+  const circleFastMode = (s.shape === "circle" && s.den > PERF.FAST_MODE_DEN);
+
+  for(let u=0; u<clippedUnits; u++){
+    const row = Math.floor(u / maxPerRow);
+    const col = u % maxPerRow;
+
+    const x = margin + col*(unitW + gap);
+    const y = top + row*(unitH + 50);
+
+    let filled = s.den;
+    if(u < whole) filled = s.den;
+    else filled = rest;
+
+    if(s.showUnitLabel){
+      drawUnitIndex(String(u+1), x + unitW/2, y - 18);
+    }
+
+    if(s.shape === "square" || s.shape === "rectangle"){
+      drawSquareOrRectCanvas({
+        x, y, w: unitW, h: unitH,
+        den: s.den,
+        filledParts: filled,
+        fillColor: s.fillColor,
+        strokeColor: s.strokeColor,
+        showOutline: s.showOutline
+      });
+    } else if(s.shape === "circle"){
+      const cx = x + unitW/2;
+      const cy = y + unitH/2;
+      const r = Math.min(unitW, unitH)/2;
+
+      if(circleFastMode){
+        const frac = filled / s.den;
+        RENDER_circleFast({
+          cx, cy, r,
+          frac,
+          fillColor: s.fillColor,
+          strokeColor: s.strokeColor,
+          showOutline: s.showOutline,
+          lines: PERF.FAST_MODE_LINES
+        });
+        warn = true;
+      } else {
+        RENDER_circleDetailed({
+          cx, cy, r,
+          den: s.den,
+          filledParts: filled,
+          fillColor: s.fillColor,
+          strokeColor: s.strokeColor,
+          showOutline: s.showOutline
+        });
+      }
+    }
+  }
+
+  let msg = `Einheiten: ${units} (davon ${whole} ganz, Rest: ${rest}/${s.den})`;
+  if (unitsClipped){
+    msg += ` — Anzeige begrenzt auf ${PERF.MAX_UNITS} Einheiten.`;
+    warn = true;
+  }
+  if (circleFastMode){
+    msg += ` — Kreis-Schnellmodus aktiv.`;
+    warn = true;
+  }
+  if (s.denClipped){
+    msg += ` — Nenner begrenzt (${PERF.MAX_DEN}).`;
+    warn = true;
+  }
+
+  setStatus(msg, warn);
+}
+
+/** =========================
+ *  SVG (Vektor) – optimiert
+ *  ========================= */
+function svgEsc(str){
+  return String(str)
+    .replaceAll("&","&amp;")
+    .replaceAll("<","&lt;")
+    .replaceAll(">","&gt;")
+    .replaceAll('"',"&quot;")
+    .replaceAll("'","&#039;");
+}
+function downloadText(filename, text, mime){
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function buildSVG(){
+  const s = getInputs();
+  const { whole, rest, units } = computeUnits(s.num, s.den);
+
+  const clippedUnits = Math.min(units, PERF.MAX_UNITS);
+
+  const margin = 20;
+  const gap = 26;
+  const top = 60;
+
+  const svgW = 980;
+  const { unitW, unitH } = computeLayout(s.shape, s.size);
+
+  const maxPerRow = Math.max(1, Math.floor((svgW - 2*margin + gap) / (unitW + gap)));
+  const rows = Math.ceil(clippedUnits / maxPerRow);
+  const svgH = top + rows*(unitH + 50) + margin;
+
+  const stroke = s.strokeColor;
+  const fill = s.fillColor;
+
+  // Kreis-SVG Schnellmodus analog
+  const circleFastMode = (s.shape === "circle" && s.den > PERF.FAST_MODE_DEN);
+
+  let parts = [];
+  parts.push(`<?xml version="1.0" encoding="UTF-8"?>`);
+  parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">`);
+  parts.push(`<rect x="0" y="0" width="${svgW}" height="${svgH}" fill="#ffffff"/>`);
+
+  if(s.showLabel){
+    let label = `${s.originalNum}/${s.originalDen}`;
+    if (s.simp.g > 1){
+      label += ` (vereinfacht: ${s.simp.num}/${s.simp.den})`;
+    }
+    if (s.denClipped){
+      label += `  → Darstellung begrenzt (ca. ${s.num}/${s.den})`;
+    }
+    parts.push(`<text x="${margin}" y="18" font-family="system-ui, Arial" font-size="16" fill="#111">${svgEsc(label)}</text>`);
+  }
+
+  for(let u=0; u<clippedUnits; u++){
+    const row = Math.floor(u / maxPerRow);
+    const col = u % maxPerRow;
+    const x = margin + col*(unitW + gap);
+    const y = top + row*(unitH + 50);
+
+    let filled = s.den;
+    if(u < whole) filled = s.den;
+    else filled = rest;
+
+    if(s.showUnitLabel){
+      parts.push(`<text x="${x + unitW/2}" y="${y - 18}" text-anchor="middle" dominant-baseline="middle"
+        font-family="system-ui, Arial" font-size="14" fill="#111">${u+1}</text>`);
+    }
+
+    if(s.shape === "square" || s.shape === "rectangle"){
+      const partH = unitH / s.den;
+
+      // Füllung als 1 großes Rect (schnell)
+      if (filled > 0){
+        parts.push(`<rect x="${x}" y="${y}" width="${unitW}" height="${partH * filled}" fill="${fill}"/>`);
+      }
+
+      if(s.showOutline){
+        for(let i=0;i<s.den;i++){
+          const yy = y + i*partH;
+          parts.push(`<rect x="${x}" y="${yy}" width="${unitW}" height="${partH}" fill="none" stroke="${stroke}" stroke-width="2"/>`);
+        }
+        parts.push(`<rect x="${x}" y="${y}" width="${unitW}" height="${unitH}" fill="none" stroke="${stroke}" stroke-width="3"/>`);
+      } else {
+        parts.push(`<rect x="${x}" y="${y}" width="${unitW}" height="${unitH}" fill="none" stroke="${stroke}" stroke-width="2"/>`);
+      }
+    }
+
+    if(s.shape === "circle"){
+      const cx = x + unitW/2;
+      const cy = y + unitH/2;
+      const r = Math.min(unitW, unitH)/2;
+
+      // Außenkreis
+      parts.push(`<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${stroke}" stroke-width="${s.showOutline ? 3 : 2}"/>`);
+
+      if(circleFastMode){
+        // 1 Füllsektor
+        const frac = filled / s.den;
+        if (frac > 0){
+          const a0 = -Math.PI/2;
+          const a1 = a0 + 2*Math.PI*frac;
+          const x0 = cx + r*Math.cos(a0);
+          const y0 = cy + r*Math.sin(a0);
+          const x1 = cx + r*Math.cos(a1);
+          const y1 = cy + r*Math.sin(a1);
+          const largeArc = (a1 - a0) > Math.PI ? 1 : 0;
+          const d = `M ${cx} ${cy} L ${x0} ${y0} A ${r} ${r} 0 ${largeArc} 1 ${x1} ${y1} Z`;
+          parts.push(`<path d="${d}" fill="${fill}" stroke="none"/>`);
+        }
+
+        // wenige Linien
+        if(s.showOutline){
+          const L = Math.max(2, Math.min(PERF.FAST_MODE_LINES, 60));
+          for(let i=0;i<L;i++){
+            const ang = (2*Math.PI/L)*i - Math.PI/2;
+            const x2 = cx + r*Math.cos(ang);
+            const y2 = cy + r*Math.sin(ang);
+            parts.push(`<line x1="${cx}" y1="${cy}" x2="${x2}" y2="${y2}" stroke="${stroke}" stroke-width="1.5"/>`);
+          }
+        }
+      } else {
+        // detailliert: den Segmente
+        for(let i=0;i<s.den;i++){
+          const a0 = (2*Math.PI/s.den)*i - Math.PI/2;
+          const a1 = (2*Math.PI/s.den)*(i+1) - Math.PI/2;
+
+          const x0 = cx + r*Math.cos(a0);
+          const y0 = cy + r*Math.sin(a0);
+          const x1 = cx + r*Math.cos(a1);
+          const y1 = cy + r*Math.sin(a1);
+          const largeArc = (a1 - a0) > Math.PI ? 1 : 0;
+
+          const d = `M ${cx} ${cy} L ${x0} ${y0} A ${r} ${r} 0 ${largeArc} 1 ${x1} ${y1} Z`;
+          const segFill = (i < filled) ? fill : "none";
+          const segStroke = s.showOutline ? stroke : "none";
+          const segStrokeW = s.showOutline ? 2 : 0;
+          parts.push(`<path d="${d}" fill="${segFill}" stroke="${segStroke}" stroke-width="${segStrokeW}"/>`);
+        }
+      }
+    }
+  }
+
+  parts.push(`</svg>`);
+  return parts.join("\n");
+}
+
+function downloadJPG(){
+  // Canvas als JPG exportieren
+  const a = document.createElement("a");
+  a.download = "bruch.jpg";
+  a.href = cnv.toDataURL("image/jpeg", 0.95);
+  a.click();
+}
+function downloadSVG(){
+  const svg = buildSVG();
+  downloadText("bruch.svg", svg, "image/svg+xml;charset=utf-8");
+}
+
+/** =========================
+ *  Events
+ *  ========================= */
+document.getElementById("btnDraw").addEventListener("click", drawCanvas);
+document.getElementById("btnJpg").addEventListener("click", () => { drawCanvas(); downloadJPG(); });
+document.getElementById("btnSvg").addEventListener("click", () => { downloadSVG(); });
+
+// optional: bei Änderungen sofort neu zeichnen (leicht)
+["num","den","shape","fillColor","strokeColor","showOutline","showLabel","showUnitLabel","size"]
+  .forEach(id => document.getElementById(id).addEventListener("change", drawCanvas));
+
+// initial
+drawCanvas();
+</script>
+</body>
+</html>
