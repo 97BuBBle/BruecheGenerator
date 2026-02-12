@@ -35,6 +35,13 @@
 
       <label>Form
         <select id="shape">
+          <label>Darstellung
+  <select id="mode">
+    <option value="stripes" selected>Streifen</option>
+    <option value="grid">Gitter (falls möglich)</option>
+  </select>
+</label>
+
           <option value="square">Quadrat</option>
           <option value="rectangle">Rechteck</option>
           <option value="circle">Kreis</option>
@@ -155,6 +162,7 @@ function getInputs(){
   const originalDen = clampInt(document.getElementById("den").value, 1, 10000);
 
   const shape = document.getElementById("shape").value;
+  const mode = document.getElementById("mode").value;
   const fillColor = document.getElementById("fillColor").value;
   const strokeColor = document.getElementById("strokeColor").value;
   const showOutline = document.getElementById("showOutline").checked;
@@ -182,7 +190,7 @@ function getInputs(){
     originalNum, originalDen,
     num, den,
     denClipped,
-    shape, fillColor, strokeColor,
+    shape, mode, fillColor, strokeColor,
     showOutline, showLabel, showUnitLabel,
     size, simp
   };
@@ -191,29 +199,85 @@ function getInputs(){
 /** =========================
  *  Zeichner (Canvas)
  *  ========================= */
-function drawSquareOrRectCanvas({x,y,w,h, den, filledParts, fillColor, strokeColor, showOutline}){
-  const partH = h / den;
+function drawSquareOrRectCanvas({x,y,w,h, den, filledParts, fillColor, strokeColor, showOutline, mode}){
 
-  // Füllung als 1 großes Rechteck + ggf. Teillinie? (schneller)
-  if (filledParts > 0){
-    ctx.fillStyle = fillColor;
-    ctx.fillRect(x, y, w, partH * filledParts);
+  // ===== STREIFEN =====
+  if (mode === "stripes"){
+    const partH = h / den;
+
+    for (let i = 0; i < den; i++){
+      if (i < filledParts){
+        ctx.fillStyle = fillColor;
+        ctx.fillRect(x, y + i*partH, w, partH);
+      }
+    }
+
+    ctx.save();
+    ctx.translate(0.5, 0.5);
+
+    if (showOutline){
+      ctx.strokeStyle = strokeColor;
+      ctx.lineWidth = 2;
+
+      for (let i = 1; i < den; i++){
+        const yy = y + i*partH;
+        ctx.beginPath();
+        ctx.moveTo(x, yy);
+        ctx.lineTo(x + w, yy);
+        ctx.stroke();
+      }
+    }
+
+    ctx.lineWidth = 3;
+    ctx.strokeRect(x, y, w, h);
+    ctx.restore();
   }
 
-  if (showSUPERVISOR_outlineNeeded(showOutline)) {
-    ctx.strokeStyle = strokeColor;
-    ctx.lineWidth = 2;
-    for(let i=0;i<den;i++){
-      const yy = y + i*partH;
-      ctx.strokeRect(x, yy, w, partH);
+  // ===== GITTER =====
+  if (mode === "grid"){
+    const root = Math.sqrt(den);
+
+    if (Number.isInteger(root)){
+      const rows = root;
+      const cols = root;
+      const cellW = w / cols;
+      const cellH = h / rows;
+
+      let counter = 0;
+
+      for (let r = 0; r < rows; r++){
+        for (let c = 0; c < cols; c++){
+
+          if (counter < filledParts){
+            ctx.fillStyle = fillColor;
+            ctx.fillRect(x + c*cellW, y + r*cellH, cellW, cellH);
+          }
+
+          if (showOutline){
+            ctx.strokeStyle = strokeColor;
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(x + c*cellW, y + r*cellH, cellW, cellH);
+          }
+
+          counter++;
+        }
+      }
+
+      ctx.lineWidth = 3;
+      ctx.strokeRect(x, y, w, h);
     }
-    ctx.lineWidth = 3;
-    ctx.strokeRect(x, y, w, h);
-  } else {
-    // Außenrahmen trotzdem als Orientierung
-    ctx.strokeStyle = strokeColor;
-    ctx.lineWidth = 3;
-    ctx.strokeRect(x, y, w, h);
+    else {
+      // Fallback auf Streifen
+      drawSquareOrRectCanvas({
+        x,y,w,h,
+        den,
+        filledParts,
+        fillColor,
+        strokeColor,
+        showOutline,
+        mode: "stripes"
+      });
+    }
   }
 }
 function RENDER_circleDetailed({cx, cy, r, den, filledParts, fillColor, strokeColor, showOutline}){
@@ -392,7 +456,8 @@ function drawCanvas(){
           filledParts: filled,
           fillColor: s.fillColor,
           strokeColor: s.strokeColor,
-          showOutline: s.showOutline
+          showOutline: s.showOutline,
+          mode: s.mode,
         });
       }
     }
